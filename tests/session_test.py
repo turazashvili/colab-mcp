@@ -149,8 +149,8 @@ class TestCheckSessionProxyToolFn:
     @pytest.mark.asyncio
     async def test_connected(self):
         ctx = Mock()
-        ctx.get_state.side_effect = (
-            lambda k: True if k == session.FE_CONNECTED_KEY else None
+        ctx.get_state.side_effect = lambda k: (
+            True if k == session.FE_CONNECTED_KEY else None
         )
         assert await session.check_session_proxy_tool_fn(ctx=ctx) is True
 
@@ -224,6 +224,146 @@ class TestCheckSessionProxyToolFn:
         args, _ = mock_webbrowser.call_args
         assert "authuser=0" in args[0]
 
+    @pytest.mark.asyncio
+    async def test_disconnected_opens_specific_notebook_url(self, mock_webbrowser):
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "0"
+            return None
+
+        ctx.get_state.side_effect = get_state
+        notebook_url = (
+            "https://colab.research.google.com/drive/"
+            "1xWSDK5kP1aWMiPPEuTCDjwkmCXxmPs2z?authuser=1"
+        )
+
+        assert (
+            await session.check_session_proxy_tool_fn(
+                authuser="2", url=notebook_url, ctx=ctx
+            )
+            is False
+        )
+
+        args, _ = mock_webbrowser.call_args
+        assert args[0].startswith(
+            "https://colab.research.google.com/drive/"
+            "1xWSDK5kP1aWMiPPEuTCDjwkmCXxmPs2z?authuser=2"
+        )
+        assert "mcpProxyToken=test-token" in args[0]
+        assert "mcpProxyPort=1234" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_disconnected_preserves_existing_fragment(self, mock_webbrowser):
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "5"
+            return None
+
+        ctx.get_state.side_effect = get_state
+        notebook_url = "https://colab.research.google.com/drive/abc123#existing=1"
+
+        assert (
+            await session.check_session_proxy_tool_fn(url=notebook_url, ctx=ctx)
+            is False
+        )
+
+        args, _ = mock_webbrowser.call_args
+        assert "authuser=5" in args[0]
+        assert "#existing=1&mcpProxyToken=test-token&mcpProxyPort=1234" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_colab_url(self):
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "0"
+            return None
+
+        ctx.get_state.side_effect = get_state
+
+        with pytest.raises(ValueError):
+            await session.check_session_proxy_tool_fn(
+                url="https://example.com/notebook", ctx=ctx
+            )
+
+
+class TestGetSessionProxyConnectionInfoToolFn:
+    @pytest.mark.asyncio
+    async def test_returns_manual_connection_info(self):
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "4"
+            return None
+
+        ctx.get_state.side_effect = get_state
+        result = await session.get_session_proxy_connection_info_tool_fn(ctx=ctx)
+
+        assert result["token"] == "test-token"
+        assert result["port"] == 1234
+        assert result["authuser"] == "4"
+        assert result["connected"] is False
+        assert "authuser=4" in result["url"]
+        assert "mcpProxyToken=test-token" in result["url"]
+
+    @pytest.mark.asyncio
+    async def test_returns_manual_connection_info_for_specific_url(self):
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return True
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "0"
+            return None
+
+        ctx.get_state.side_effect = get_state
+        result = await session.get_session_proxy_connection_info_tool_fn(
+            authuser="2",
+            url="https://colab.research.google.com/drive/abc123?foo=bar",
+            ctx=ctx,
+        )
+
+        assert result["connected"] is True
+        assert result["authuser"] == "2"
+        assert result["url"].startswith(
+            "https://colab.research.google.com/drive/abc123?foo=bar&authuser=2"
+        )
+
 
 class TestColabProxyClient:
     def test_is_connected(self, mock_wss):
@@ -264,7 +404,8 @@ class TestColabProxyClient:
         client = session.ColabProxyClient(mock_wss)
         mock_wss.connection_live.set()
         async with client:
-            await client._start_task
+            if client._start_task is not None:
+                await client._start_task
 
         mock_colab_transport.assert_called_once_with(mock_wss)
         mock_client.assert_called_with(mock_colab_transport.return_value)
@@ -276,14 +417,14 @@ class TestColabTransport:
     async def test_connect_session(self, mock_client_session, mock_wss):
         transport = session.ColabTransport(mock_wss)
         mock_client_session.return_value.__aenter__ = AsyncMock()
-        async with transport.connect_session(foo="bar") as client_session:
+        async with transport.connect_session() as client_session:
             assert (
                 client_session
                 == mock_client_session.return_value.__aenter__.return_value
             )
 
         mock_client_session.assert_called_once_with(
-            mock_wss.read_stream, mock_wss.write_stream, foo="bar"
+            mock_wss.read_stream, mock_wss.write_stream
         )
 
 
