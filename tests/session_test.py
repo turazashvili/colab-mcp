@@ -61,7 +61,7 @@ class TestColabProxyMiddleware:
     @pytest.mark.asyncio
     async def test_connection_live(self, mock_proxy_client):
         """Tests connection state change from disconnected to connected."""
-        middleware = session.ColabProxyMiddleware(mock_proxy_client)
+        middleware = session.ColabProxyMiddleware(mock_proxy_client, authuser="0")
         mock_proxy_client.is_connected.return_value = True
         context = Mock(spec=MiddlewareContext)
         context.fastmcp_context.set_state = Mock()
@@ -74,6 +74,7 @@ class TestColabProxyMiddleware:
         context.fastmcp_context.set_state.assert_any_call("fe_connected", True)
         context.fastmcp_context.set_state.assert_any_call("proxy_token", "test-token")
         context.fastmcp_context.set_state.assert_any_call("proxy_port", 1234)
+        context.fastmcp_context.set_state.assert_any_call("authuser", "0")
         assert middleware.last_message_connected is True
         context.fastmcp_context.send_tool_list_changed.assert_called_once()
 
@@ -151,10 +152,11 @@ class TestCheckSessionProxyToolFn:
         ctx.get_state.side_effect = (
             lambda k: True if k == session.FE_CONNECTED_KEY else None
         )
-        assert await session.check_session_proxy_tool_fn(ctx) is True
+        assert await session.check_session_proxy_tool_fn(ctx=ctx) is True
 
     @pytest.mark.asyncio
-    async def test_disconnected(self, mock_webbrowser):
+    async def test_disconnected_uses_cli_default(self, mock_webbrowser):
+        """When no authuser is passed to the tool, it falls back to the CLI default from state."""
         ctx = Mock()
 
         def get_state(k):
@@ -164,14 +166,63 @@ class TestCheckSessionProxyToolFn:
                 return "test-token"
             if k == session.PROXY_PORT_KEY:
                 return 1234
+            if k == session.AUTHUSER_KEY:
+                return "3"
             return None
 
         ctx.get_state.side_effect = get_state
-        assert await session.check_session_proxy_tool_fn(ctx) is False
+        assert await session.check_session_proxy_tool_fn(ctx=ctx) is False
         mock_webbrowser.assert_called_once()
         args, _ = mock_webbrowser.call_args
+        assert "authuser=3" in args[0]
         assert "mcpProxyToken=test-token" in args[0]
         assert "mcpProxyPort=1234" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_disconnected_with_explicit_authuser(self, mock_webbrowser):
+        """When authuser is explicitly passed to the tool, it overrides the CLI default."""
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return "0"
+            return None
+
+        ctx.get_state.side_effect = get_state
+        assert await session.check_session_proxy_tool_fn(authuser="2", ctx=ctx) is False
+        mock_webbrowser.assert_called_once()
+        args, _ = mock_webbrowser.call_args
+        assert "authuser=2" in args[0]
+        assert "mcpProxyToken=test-token" in args[0]
+        assert "mcpProxyPort=1234" in args[0]
+
+    @pytest.mark.asyncio
+    async def test_disconnected_defaults_to_zero(self, mock_webbrowser):
+        """When no authuser in tool call or CLI state, defaults to 0."""
+        ctx = Mock()
+
+        def get_state(k):
+            if k == session.FE_CONNECTED_KEY:
+                return False
+            if k == session.PROXY_TOKEN_KEY:
+                return "test-token"
+            if k == session.PROXY_PORT_KEY:
+                return 1234
+            if k == session.AUTHUSER_KEY:
+                return None
+            return None
+
+        ctx.get_state.side_effect = get_state
+        assert await session.check_session_proxy_tool_fn(ctx=ctx) is False
+        mock_webbrowser.assert_called_once()
+        args, _ = mock_webbrowser.call_args
+        assert "authuser=0" in args[0]
 
 
 class TestColabProxyClient:

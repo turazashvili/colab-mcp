@@ -191,10 +191,11 @@ class InsufficientQuotaError(Exception):
 
 
 class ColabClient:
-    def __init__(self, env: ColabEnvironment, session, logger=None):
+    def __init__(self, env: ColabEnvironment, session, authuser="0", logger=None):
         self.colab_domain = env.domain
         self.colab_api_domain = env.api
         self.session = session  # requests.Session()
+        self.authuser = authuser
         if "localhost" in self.colab_domain:
             self.session.verify = False
         self.logger = logger or logging.getLogger(__name__)
@@ -223,7 +224,7 @@ class ColabClient:
         if parsed_endpoint.hostname in urlparse(self.colab_domain).hostname:
             if params is None:
                 params = {}
-            params["authuser"] = "0"
+            params["authuser"] = self.authuser
 
         request_headers = headers.copy() if headers else {}
         request_headers[ACCEPT_JSON_HEADER["key"]] = ACCEPT_JSON_HEADER["value"]

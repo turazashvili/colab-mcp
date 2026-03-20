@@ -35,6 +35,7 @@ UI_CONNECTION_TIMEOUT = 60.0  # secs
 FE_CONNECTED_KEY = "fe_connected"
 PROXY_TOKEN_KEY = "proxy_token"
 PROXY_PORT_KEY = "proxy_port"
+AUTHUSER_KEY = "authuser"
 INJECTED_TOOL_NAME = "open_colab_browser_connection"
 
 
@@ -98,8 +99,9 @@ class ColabProxyClient:
 
 
 class ColabProxyMiddleware(Middleware):
-    def __init__(self, proxy_client: ColabProxyClient):
+    def __init__(self, proxy_client: ColabProxyClient, authuser: str = "0"):
         self.proxy_client = proxy_client
+        self.authuser = authuser
         self.last_message_connected = self.proxy_client.is_connected()
 
     async def on_message(self, context: MiddlewareContext, call_next):
@@ -112,6 +114,7 @@ class ColabProxyMiddleware(Middleware):
         )
         context.fastmcp_context.set_state(PROXY_TOKEN_KEY, self.proxy_client.wss.token)
         context.fastmcp_context.set_state(PROXY_PORT_KEY, self.proxy_client.wss.port)
+        context.fastmcp_context.set_state(AUTHUSER_KEY, self.authuser)
 
         result = await call_next(context)
 
@@ -159,14 +162,28 @@ class ColabProxyMiddleware(Middleware):
             )
 
 
-async def check_session_proxy_tool_fn(ctx: Context = CurrentContext()) -> bool:
+async def check_session_proxy_tool_fn(
+    authuser: str = "", ctx: Context = CurrentContext()
+) -> bool:
+    """Opens a connection to a Google Colab browser session and unlocks notebook editing tools.
+
+    Args:
+        authuser: Google account index to open Colab with (e.g. "0" for default,
+            "1" for second account, "2" for third). If not provided, falls back
+            to the --authuser CLI flag or defaults to "0".
+
+    Returns:
+        True if the connection attempt succeeded, False otherwise.
+    """
     fe_connected = ctx.get_state(FE_CONNECTED_KEY)
     token = ctx.get_state(PROXY_TOKEN_KEY)
     port = ctx.get_state(PROXY_PORT_KEY)
+    if not authuser:
+        authuser = ctx.get_state(AUTHUSER_KEY) or "0"
     if fe_connected:
         return True
     webbrowser.open_new(
-        f"{COLAB}{SCRATCH_PATH}#mcpProxyToken={token}&mcpProxyPort={port}"
+        f"{COLAB}{SCRATCH_PATH}?authuser={authuser}#mcpProxyToken={token}&mcpProxyPort={port}"
     )
     return False
 
@@ -174,17 +191,18 @@ async def check_session_proxy_tool_fn(ctx: Context = CurrentContext()) -> bool:
 check_session_proxy_tool = Tool.from_function(
     fn=check_session_proxy_tool_fn,
     name=INJECTED_TOOL_NAME,
-    description="Opens a connection to a Google Colab browser session and unlocks notebook editing tools. Returns a boolean representing whether the connection attempt succeeded",
+    description="Opens a connection to a Google Colab browser session and unlocks notebook editing tools. Pass authuser to select which Google account to use (e.g. '0' for default, '1' for second account, '2' for third). Returns a boolean representing whether the connection attempt succeeded",
 )
 
 
 class ColabSessionProxy:
-    def __init__(self):
+    def __init__(self, authuser: str = "0"):
         self._exit_stack = AsyncExitStack()
         self.proxy_server: FastMCPProxy | None = None
         # list order matters, see: https://gofastmcp.com/servers/middleware#multiple-middleware
         self.middleware: list[Middleware] = []
         self.wss: ColabWebSocketServer | None = None
+        self.authuser = authuser
 
     async def start_proxy_server(self):
         self.wss = await self._exit_stack.enter_async_context(ColabWebSocketServer())
@@ -196,7 +214,9 @@ class ColabSessionProxy:
             instructions="Connects to a user's Google Colab session in a browser and allows for interactions with their Google Colab notebook",
         )
         # ColabProxyMiddleware must be first because it sets the fe_connected state
-        self.middleware.append(ColabProxyMiddleware(proxy_client))
+        self.middleware.append(
+            ColabProxyMiddleware(proxy_client, authuser=self.authuser)
+        )
         self.middleware.append(
             ToolInjectionMiddleware(tools=[check_session_proxy_tool])
         )

@@ -76,6 +76,13 @@ def parse_args(v):
         action="store",
         default="colab-mcp-oauth-config.json",
     )
+    parser.add_argument(
+        "-a",
+        "--authuser",
+        help="Google account index to use when opening Colab (e.g. 0 for default, 1 for second account). Corresponds to the authuser URL parameter.",
+        action="store",
+        default="0",
+    )
     return parser.parse_args(v)
 
 
@@ -96,7 +103,7 @@ async def main_async():
 
     if args.enable_proxy:
         logging.info("enabling session proxy tools")
-        session_mcp = ColabSessionProxy()
+        session_mcp = ColabSessionProxy(authuser=args.authuser)
         await session_mcp.start_proxy_server()
         mcp.mount(session_mcp.proxy_server)
         for middleware in session_mcp.middleware:
